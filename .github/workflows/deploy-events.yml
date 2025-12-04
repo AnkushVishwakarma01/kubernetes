@@ -1,0 +1,64 @@
+name: Create Deployment Event
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    types: [closed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+
+jobs:
+  create_deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout minimal
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Create GitHub deployment object
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.sha }}
+        run: |
+          payload=$(jq -n --arg ref "$REF" --arg env "staging" \
+            --arg build_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{ref:$ref, environment:$env, auto_merge:false, required_contexts:[], payload:{build_url:$build_url}}')
+          echo "Creating deployment with payload: $payload"
+          resp=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -X POST "https://api.github.com/repos/$REPO/deployments" \
+            -d "$payload")
+          echo "$resp" | jq .
+          id=$(echo "$resp" | jq -r '.id // empty')
+          if [ -z "$id" ]; then
+            echo "Failed to create deployment" >&2
+            exit 1
+          fi
+          echo "ID=$id" >> $GITHUB_ENV
+
+      - name: Post deployment status (success or simulated failure)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          id=${{ env.ID }}
+          # ~20% failure rate simulation
+          if [ $((RANDOM % 5)) -eq 0 ]; then
+            state=failure
+            desc="Simulated failure"
+          else
+            state=success
+            desc="Simulated success"
+          fi
+          status_payload=$(jq -n --arg s "$state" --arg d "$desc" --arg env "staging" '{state:$s, description:$d, environment:$env}')
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -X POST "https://api.github.com/repos/$REPO/deployments/$id/statuses" \
+            -d "$status_payload" | jq .
